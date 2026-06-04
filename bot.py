@@ -93,32 +93,19 @@ def get_owner_reply_keyboard(admin_id: int):
     return builder.as_markup()
 
 
-async def extract_channel_info(channel_input: str) -> tuple:
-    """Извлекает ID, username и красивую ссылку канала"""
+async def extract_channel_id(channel_input: str) -> int:
+    """Извлекает только ID канала, без сохранения ссылок"""
     channel_input = channel_input.strip()
     
-    # Если уже ID
     if channel_input.lstrip('-').isdigit():
-        channel_id = int(channel_input)
-        try:
-            chat = await bot.get_chat(channel_id)
-            username = chat.username
-            if username:
-                display_link = f"https://t.me/{username}"
-            else:
-                display_link = f"канал {channel_id}"
-            return channel_id, username, display_link
-        except:
-            return channel_id, None, f"канал {channel_id}"
+        return int(channel_input)
     
-    # Если ссылка
     match = re.search(r'(?:https?://)?(?:t\.me|telegram\.me)/([a-zA-Z0-9_]+)', channel_input)
     if match:
         username = match.group(1)
         try:
             chat = await bot.get_chat(f"@{username}")
-            display_link = f"https://t.me/{username}"
-            return chat.id, username, display_link
+            return chat.id
         except Exception as e:
             raise ValueError(f"Не удалось найти канал @{username}")
     
@@ -168,12 +155,6 @@ async def copy_single_post_to_channel(target_channel_id: int, message: types.Mes
                 document=message.document.file_id,
                 caption=message.caption or ""
             )
-        elif message.audio:
-            await bot.send_audio(
-                chat_id=target_channel_id,
-                audio=message.audio.file_id,
-                caption=message.caption or ""
-            )
         elif message.text:
             await bot.send_message(
                 chat_id=target_channel_id,
@@ -218,22 +199,13 @@ async def cmd_start(message: types.Message):
 1. Нажмите кнопку "Новое копирование"
 2. Укажите каналы-источники (откуда копировать)
 3. Укажите каналы-получатели (куда копировать)
-4. Выберите время отправки (сейчас или отложить)
+4. Выберите время отправки
 5. Бот автоматически копирует ВСЕ НОВЫЕ посты
-
-✅ <b>Возможности:</b>
-• Копирование альбомов
-• Работа с приватными каналами
-• Отложенная публикация
-• Копирование без отметки "переслано"
 
 ⚠️ <b>Важно:</b>
 • Бот должен быть АДМИНИСТРАТОМ всех каналов
 • Копируются ТОЛЬКО новые посты
 """
-    
-    if user_id in ADMIN_IDS or user_id == OWNER_ID:
-        welcome_text += "\n\n📞 <b>Администраторам:</b> Кнопка 'Связь с владельцем' доступна для связи."
     
     await message.answer(welcome_text, parse_mode="HTML", reply_markup=get_main_menu(user_id))
 
@@ -245,9 +217,7 @@ async def setup_callback(callback: types.CallbackQuery, state: FSMContext):
     if user_id not in user_settings:
         user_settings[user_id] = {
             "source_channels": [],
-            "source_channel_info": [],
             "target_channels": [],
-            "target_channel_info": [],
             "schedule_time": None
         }
     
@@ -288,15 +258,10 @@ async def process_source_channels(message: types.Message, state: FSMContext):
         for ch in channels:
             if ch.strip():
                 try:
-                    channel_id, username, display_link = await extract_channel_info(ch)
+                    channel_id = await extract_channel_id(ch)
                     if channel_id not in user_settings[user_id]["source_channels"]:
                         user_settings[user_id]["source_channels"].append(channel_id)
-                        user_settings[user_id]["source_channel_info"].append({
-                            "id": channel_id,
-                            "username": username,
-                            "link": display_link  # Сохраняем красивую ссылку
-                        })
-                        await message.answer(f"✅ Источник добавлен: {display_link}")
+                        await message.answer(f"✅ Источник добавлен (ID: {channel_id})")
                     else:
                         await message.answer(f"ℹ️ Канал уже добавлен")
                 except ValueError as e:
@@ -324,15 +289,10 @@ async def process_target_channels(message: types.Message, state: FSMContext):
         for target in targets:
             if target.strip():
                 try:
-                    channel_id, username, display_link = await extract_channel_info(target)
+                    channel_id = await extract_channel_id(target)
                     if channel_id not in user_settings[user_id]["target_channels"]:
                         user_settings[user_id]["target_channels"].append(channel_id)
-                        user_settings[user_id]["target_channel_info"].append({
-                            "id": channel_id,
-                            "username": username,
-                            "link": display_link  # Сохраняем красивую ссылку
-                        })
-                        await message.answer(f"✅ Получатель добавлен: {display_link}")
+                        await message.answer(f"✅ Получатель добавлен (ID: {channel_id})")
                     else:
                         await message.answer(f"ℹ️ Канал уже добавлен")
                 except ValueError as e:
@@ -353,8 +313,7 @@ async def schedule_later(callback: types.CallbackQuery, state: FSMContext):
         "⏰ <b>Укажите время отправки</b>\n\n"
         "Формат: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n"
         "Например: <code>25.12.2024 14:30</code>\n\n"
-        "Или через сколько часов: <code>+2</code> (через 2 часа)\n"
-        "Или: <code>+30</code> (через 30 минут)\n\n"
+        "Или через сколько часов: <code>+2</code> (через 2 часа)\n\n"
         "❌ Для отмены отправьте /cancel",
         parse_mode="HTML",
         reply_markup=get_schedule_back_keyboard()
@@ -395,26 +354,21 @@ async def process_schedule(message: types.Message, state: FSMContext):
         await show_confirmation(message, user_id, state)
         
     except ValueError:
-        await message.answer("❌ Неверный формат. Используйте: ДД.ММ.ГГГГ ЧЧ:ММ или +часы\n\n❌ Для отмены отправьте /cancel")
+        await message.answer("❌ Неверный формат. Используйте: ДД.ММ.ГГГГ ЧЧ:ММ или +часы")
 
 
 async def show_confirmation(message: types.Message, user_id: int, state: FSMContext):
     settings = user_settings[user_id]
     
-    source_list = "\n".join([f"• {info['link']}" for info in settings["source_channel_info"]])
-    target_list = "\n".join([f"• {info['link']}" for info in settings["target_channel_info"]])
-    
+    source_count = len(settings['source_channels'])
+    target_count = len(settings['target_channels'])
     schedule_text = "Сразу (сейчас)" if not settings["schedule_time"] else settings["schedule_time"].strftime("%d.%m.%Y %H:%M")
     
     summary = f"""
 📋 <b>Подтвердите настройки</b>
 
-📍 <b>Источники ({len(settings['source_channels'])}):</b>
-{source_list}
-
-🎯 <b>Получатели ({len(settings['target_channels'])}):</b>
-{target_list}
-
+📍 <b>Источников:</b> {source_count}
+🎯 <b>Получателей:</b> {target_count}
 ⏰ <b>Время отправки:</b> {schedule_text}
 
 ✅ <b>Всё верно?</b>
@@ -435,8 +389,7 @@ async def back_to_targets(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "📢 <b>Шаг 2/3: Куда копировать?</b>\n\n"
         "Отправьте ссылки на каналы-получатели\n\n"
-        "Когда закончите, отправьте слово <code>готово</code>\n\n"
-        "❌ Для отмены отправьте /cancel",
+        "Когда закончите, отправьте слово <code>готово</code>",
         parse_mode="HTML"
     )
     await callback.answer()
@@ -447,12 +400,9 @@ async def confirm_settings(callback: types.CallbackQuery, state: FSMContext):
     user_id = callback.from_user.id
     settings = user_settings[user_id]
     
-    schedule_text = "сразу" if not settings["schedule_time"] else settings["schedule_time"].strftime("%d.%m.%Y %H:%M")
-    
     await callback.message.edit_text(
         f"✅ <b>Настройки сохранены!</b>\n\n"
-        f"📊 {len(settings['source_channels'])} источников → {len(settings['target_channels'])} получателей\n"
-        f"⏰ Время отправки: {schedule_text}\n\n"
+        f"📊 {len(settings['source_channels'])} источников → {len(settings['target_channels'])} получателей\n\n"
         f"🔄 Бот копирует новые посты в реальном времени",
         parse_mode="HTML"
     )
@@ -483,34 +433,12 @@ async def show_settings(callback: types.CallbackQuery):
     else:
         settings = user_settings[user_id]
         
-        source_links = []
-        for info in settings.get("source_channel_info", []):
-            if info.get("username"):
-                source_links.append(f"• <a href='https://t.me/{info['username']}'>{info['link']}</a>")
-            else:
-                source_links.append(f"• {info['link']}")
-        
-        target_links = []
-        for info in settings.get("target_channel_info", []):
-            if info.get("username"):
-                target_links.append(f"• <a href='https://t.me/{info['username']}'>{info['link']}</a>")
-            else:
-                target_links.append(f"• {info['link']}")
-        
-        source_text = "\n".join(source_links) if source_links else "Нет"
-        target_text = "\n".join(target_links) if target_links else "Нет"
-        schedule_text = "Сразу" if not settings.get("schedule_time") else settings["schedule_time"].strftime("%d.%m.%Y %H:%M")
-        
         text = f"""
 📊 <b>Ваши настройки</b>
 
-📍 <b>Источники ({len(settings['source_channels'])}):</b>
-{source_text}
-
-🎯 <b>Получатели ({len(settings['target_channels'])}):</b>
-{target_text}
-
-⏰ <b>Время отправки:</b> {schedule_text}
+📍 <b>Источников:</b> {len(settings['source_channels'])}
+🎯 <b>Получателей:</b> {len(settings['target_channels'])}
+⏰ <b>Время отправки:</b> {"Сразу" if not settings.get("schedule_time") else settings["schedule_time"].strftime("%d.%m.%Y %H:%M")}
         """
         
         await callback.message.edit_text(text, parse_mode="HTML")
@@ -539,9 +467,7 @@ async def contact_owner(callback: types.CallbackQuery, state: FSMContext):
     
     await state.set_state(SupportStates.waiting_for_admin_message)
     await callback.message.answer(
-        "📞 <b>Связь с владельцем бота</b>\n\n"
-        "Напишите ваше сообщение. Владелец получит его и сможет ответить.\n\n"
-        "❌ Для отмены отправьте /cancel",
+        "📞 <b>Связь с владельцем</b>\n\nНапишите ваше сообщение.\n\n❌ /cancel для отмены",
         parse_mode="HTML"
     )
     await callback.answer()
@@ -551,23 +477,14 @@ async def contact_owner(callback: types.CallbackQuery, state: FSMContext):
 async def process_admin_message(message: types.Message, state: FSMContext):
     admin_id = message.from_user.id
     admin_name = message.from_user.full_name
-    admin_username = f"@{message.from_user.username}" if message.from_user.username else "без username"
-    
-    user_messages[admin_id] = {
-        "text": message.text,
-        "admin_name": admin_name,
-        "admin_username": admin_username,
-        "admin_id": admin_id
-    }
     
     owner_text = f"""
-📨 <b>Новое сообщение от администратора</b>
+📨 <b>Сообщение от администратора</b>
 
-👤 <b>От:</b> {admin_name} ({admin_username})
+👤 <b>От:</b> {admin_name}
 🆔 <b>ID:</b> <code>{admin_id}</code>
 
-📝 <b>Сообщение:</b>
-{message.text}
+📝 {message.text}
     """
     
     await bot.send_message(
@@ -577,27 +494,22 @@ async def process_admin_message(message: types.Message, state: FSMContext):
         reply_markup=get_owner_reply_keyboard(admin_id)
     )
     
-    await message.answer(
-        "✅ Ваше сообщение отправлено владельцу. Ожидайте ответа.",
-        parse_mode="HTML"
-    )
+    await message.answer("✅ Сообщение отправлено владельцу")
     await state.clear()
 
 
 @dp.callback_query(F.data.startswith("reply_to_admin_"))
 async def owner_reply(callback: types.CallbackQuery, state: FSMContext):
     if callback.from_user.id != OWNER_ID:
-        await callback.answer("Только владелец бота может отвечать", show_alert=True)
+        await callback.answer("Доступ только владельцу", show_alert=True)
         return
     
     admin_id = int(callback.data.split("_")[3])
-    
     await state.update_data(reply_to_admin=admin_id)
     await state.set_state(SupportStates.waiting_for_owner_reply)
     
     await callback.message.answer(
-        f"✉️ <b>Ответ администратору (ID: {admin_id})</b>\n\n"
-        "Напишите ваш ответ.\n\n❌ Для отмены /cancel",
+        f"✉️ <b>Ответ админу {admin_id}</b>\n\nНапишите ответ:\n\n❌ /cancel",
         parse_mode="HTML"
     )
     await callback.answer()
@@ -609,19 +521,16 @@ async def process_owner_reply(message: types.Message, state: FSMContext):
     admin_id = data.get("reply_to_admin")
     
     if not admin_id:
-        await message.answer("❌ Ошибка: не найден получатель")
+        await message.answer("❌ Ошибка")
         return
     
-    reply_text = f"""
-📨 <b>Ответ от владельца бота</b>
-
-📝 <b>Сообщение:</b>
-{message.text}
-    """
-    
     try:
-        await bot.send_message(chat_id=admin_id, text=reply_text, parse_mode="HTML")
-        await message.answer(f"✅ Ответ отправлен администратору")
+        await bot.send_message(
+            chat_id=admin_id,
+            text=f"📨 <b>Ответ владельца</b>\n\n{message.text}",
+            parse_mode="HTML"
+        )
+        await message.answer("✅ Ответ отправлен")
     except Exception as e:
         await message.answer(f"❌ Ошибка: {e}")
     
@@ -630,25 +539,19 @@ async def process_owner_reply(message: types.Message, state: FSMContext):
 
 @dp.message(Command("cancel"))
 async def cancel_cmd(message: types.Message, state: FSMContext):
-    current_state = await state.get_state()
-    
-    if current_state is None:
-        await message.answer("❌ Нет активных действий для отмены")
+    if await state.get_state() is None:
+        await message.answer("❌ Нет активных действий")
         return
     
     await state.clear()
-    await message.answer(
-        "❌ Действие отменено",
-        reply_markup=get_main_menu(message.from_user.id)
-    )
+    await message.answer("❌ Отменено", reply_markup=get_main_menu(message.from_user.id))
 
 
 async def main():
     me = await bot.get_me()
     print("=" * 50)
     print(f"🚀 Бот запущен: @{me.username}")
-    print(f"👑 Владелец ID: {OWNER_ID}")
-    print(f"👥 Администраторы: {ADMIN_IDS}")
+    print(f"👑 Владелец: {OWNER_ID}")
     print("=" * 50)
     await dp.start_polling(bot)
 
