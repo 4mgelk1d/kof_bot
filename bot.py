@@ -97,11 +97,11 @@ def get_confirmation_keyboard():
     return builder.as_markup()
 
 
-def get_owner_reply_keyboard(user_id: int, admin_id: int):
+def get_owner_reply_keyboard(admin_id: int):
     """Клавиатура для ответа владельца админу"""
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="✉️ Ответить", callback_data=f"reply_to_admin_{admin_id}_{user_id}")
+        InlineKeyboardButton(text="✉️ Ответить", callback_data=f"reply_to_admin_{admin_id}")
     )
     return builder.as_markup()
 
@@ -271,7 +271,8 @@ async def setup_callback(callback: types.CallbackQuery, state: FSMContext):
         "https://t.me/channel2\n"
         "-1001234567890\n\n"
         "Когда закончите, отправьте слово <code>готово</code>\n\n"
-        "🔓 <b>Для приватных каналов:</b> просто добавьте бота в канал админом и укажите ID канала",
+        "🔓 <b>Для приватных каналов:</b> просто добавьте бота в канал админом и укажите ID канала\n\n"
+        "❌ Для отмены отправьте /cancel",
         parse_mode="HTML"
     )
     await callback.answer()
@@ -290,7 +291,8 @@ async def process_source_channels(message: types.Message, state: FSMContext):
         await message.answer(
             "📢 <b>Шаг 2/3: Куда копировать?</b>\n\n"
             "Отправьте ссылки на каналы-получатели (каждый с новой строки)\n\n"
-            "Когда закончите, отправьте слово <code>готово</code>",
+            "Когда закончите, отправьте слово <code>готово</code>\n\n"
+            "❌ Для отмены отправьте /cancel",
             parse_mode="HTML"
         )
     else:
@@ -362,7 +364,8 @@ async def schedule_later(callback: types.CallbackQuery, state: FSMContext):
         "Формат: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n"
         "Например: <code>25.12.2024 14:30</code>\n\n"
         "Или через сколько часов: <code>+2</code> (через 2 часа)\n"
-        "Или: <code>+30</code> (через 30 минут)",
+        "Или: <code>+30</code> (через 30 минут)\n\n"
+        "❌ Для отмены отправьте /cancel",
         parse_mode="HTML",
         reply_markup=get_schedule_back_keyboard()
     )
@@ -402,7 +405,7 @@ async def process_schedule(message: types.Message, state: FSMContext):
         await show_confirmation(message, user_id, state)
         
     except ValueError:
-        await message.answer("❌ Неверный формат. Используйте: ДД.ММ.ГГГГ ЧЧ:ММ или +часы")
+        await message.answer("❌ Неверный формат. Используйте: ДД.ММ.ГГГГ ЧЧ:ММ или +часы\n\n❌ Для отмены отправьте /cancel")
 
 
 async def show_confirmation(message: types.Message, user_id: int, state: FSMContext):
@@ -443,7 +446,8 @@ async def back_to_targets(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.edit_text(
         "📢 <b>Шаг 2/3: Куда копировать?</b>\n\n"
         "Отправьте ссылки на каналы-получатели\n\n"
-        "Когда закончите, отправьте слово <code>готово</code>",
+        "Когда закончите, отправьте слово <code>готово</code>\n\n"
+        "❌ Для отмены отправьте /cancel",
         parse_mode="HTML"
     )
     await callback.answer()
@@ -551,7 +555,7 @@ async def contact_owner(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(
         "📞 <b>Связь с владельцем бота</b>\n\n"
         "Напишите ваше сообщение. Владелец получит его и сможет ответить.\n\n"
-        "Для отмены отправьте /cancel",
+        "❌ Для отмены отправьте /cancel",
         parse_mode="HTML"
     )
     await callback.answer()
@@ -586,7 +590,7 @@ async def process_admin_message(message: types.Message, state: FSMContext):
         chat_id=OWNER_ID,
         text=owner_text,
         parse_mode="HTML",
-        reply_markup=get_owner_reply_keyboard(admin_id, admin_id)
+        reply_markup=get_owner_reply_keyboard(admin_id)
     )
     
     await message.answer(
@@ -605,8 +609,7 @@ async def owner_reply(callback: types.CallbackQuery, state: FSMContext):
         return
     
     # Извлекаем ID админа
-    data_parts = callback.data.split("_")
-    admin_id = int(data_parts[3])
+    admin_id = int(callback.data.split("_")[3])
     
     # Сохраняем в состоянии ID админа для ответа
     await state.update_data(reply_to_admin=admin_id)
@@ -615,7 +618,7 @@ async def owner_reply(callback: types.CallbackQuery, state: FSMContext):
     await callback.message.answer(
         f"✉️ <b>Ответ администратору (ID: {admin_id})</b>\n\n"
         "Напишите ваш ответ. Он будет отправлен администратору.\n\n"
-        "Для отмены отправьте /cancel",
+        "❌ Для отмены отправьте /cancel",
         parse_mode="HTML"
     )
     await callback.answer()
@@ -627,8 +630,7 @@ async def process_owner_reply(message: types.Message, state: FSMContext):
     admin_id = data.get("reply_to_admin")
     
     if not admin_id:
-        await message.answer("❌ Ошибка: не найден получатель")
-        await state.clear()
+        await message.answer("❌ Ошибка: не найден получатель\n\nОтправьте /cancel для отмены")
         return
     
     # Отправляем ответ админу
@@ -654,13 +656,28 @@ async def process_owner_reply(message: types.Message, state: FSMContext):
     await state.clear()
 
 
+# ============ ОБРАБОТЧИК /cancel ДЛЯ ВСЕХ СОСТОЯНИЙ ============
+
 @dp.message(Command("cancel"))
 async def cancel_cmd(message: types.Message, state: FSMContext):
-    """Отмена текущего действия"""
+    """Отмена текущего действия для любого состояния"""
+    current_state = await state.get_state()
+    
+    if current_state is None:
+        await message.answer("❌ Нет активных действий для отмены")
+        return
+    
+    # Очищаем состояние
     await state.clear()
+    
+    # Очищаем временные данные если есть
+    user_id = message.from_user.id
+    if user_id in user_settings and not user_settings[user_id].get("source_channels"):
+        pass  # Оставляем настройки если они есть
+    
     await message.answer(
-        "❌ Действие отменено",
-        reply_markup=get_main_menu(message.from_user.id)
+        "❌ Действие отменено\n\nВы можете начать заново через меню.",
+        reply_markup=get_main_menu(user_id)
     )
 
 
@@ -671,6 +688,7 @@ async def main():
     print(f"👑 Владелец ID: {OWNER_ID}")
     print(f"👥 Администраторы: {ADMIN_IDS}")
     print("✅ Режим: копирование новых постов + альбомы + отложенная отправка + связь с владельцем")
+    print("✅ Команда /cancel работает во всех состояниях")
     print("=" * 50)
     await dp.start_polling(bot)
 
