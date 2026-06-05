@@ -22,7 +22,6 @@ bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-# Временное хранилище
 temp: Dict[int, Dict] = {}
 
 class ProfileStates(StatesGroup):
@@ -35,8 +34,8 @@ class ProfileStates(StatesGroup):
 
 def get_main_menu():
     builder = InlineKeyboardBuilder()
-    builder.row(InlineKeyboardButton(text="📁 Управление профилями", callback_data="profiles_menu"))
-    builder.row(InlineKeyboardButton(text="❓ Помощь", callback_data="help"))
+    builder.row(InlineKeyboardButton(text="Управление профилями", callback_data="profiles_menu"))
+    builder.row(InlineKeyboardButton(text="Помощь", callback_data="help"))
     return builder.as_markup()
 
 
@@ -45,11 +44,11 @@ def get_profiles_menu(user_id: int):
     profiles = db.get_profiles(user_id)
     
     for p in profiles:
-        status = "✅" if p['is_active'] else "⏸"
+        status = "ON" if p['is_active'] else "OFF"
         builder.row(InlineKeyboardButton(text=f"{status} {p['name']}", callback_data=f"profile_{p['id']}"))
     
-    builder.row(InlineKeyboardButton(text="➕ Создать профиль", callback_data="create_profile"))
-    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu"))
+    builder.row(InlineKeyboardButton(text="Создать профиль", callback_data="create_profile"))
+    builder.row(InlineKeyboardButton(text="Назад", callback_data="back_to_menu"))
     return builder.as_markup()
 
 
@@ -57,25 +56,25 @@ def get_profile_actions(profile_id: int, is_active: bool):
     builder = InlineKeyboardBuilder()
     
     if is_active:
-        builder.row(InlineKeyboardButton(text="⏸ Остановить", callback_data=f"stop_{profile_id}"))
+        builder.row(InlineKeyboardButton(text="Остановить", callback_data=f"stop_{profile_id}"))
     else:
-        builder.row(InlineKeyboardButton(text="▶️ Запустить", callback_data=f"start_{profile_id}"))
+        builder.row(InlineKeyboardButton(text="Запустить", callback_data=f"start_{profile_id}"))
     
     builder.row(
-        InlineKeyboardButton(text="📥 Источники", callback_data=f"sources_{profile_id}"),
-        InlineKeyboardButton(text="📤 Получатели", callback_data=f"targets_{profile_id}"),
-        InlineKeyboardButton(text="⏰ Время", callback_data=f"schedule_{profile_id}")
+        InlineKeyboardButton(text="Источники", callback_data=f"sources_{profile_id}"),
+        InlineKeyboardButton(text="Получатели", callback_data=f"targets_{profile_id}"),
+        InlineKeyboardButton(text="Время", callback_data=f"schedule_{profile_id}")
     )
-    builder.row(InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{profile_id}"))
-    builder.row(InlineKeyboardButton(text="🔙 К списку", callback_data="profiles_menu"))
+    builder.row(InlineKeyboardButton(text="Удалить", callback_data=f"delete_{profile_id}"))
+    builder.row(InlineKeyboardButton(text="К списку", callback_data="profiles_menu"))
     return builder.as_markup()
 
 
 def get_confirm_keyboard(profile_id: int):
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"confirm_{profile_id}"),
-        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_settings")
+        InlineKeyboardButton(text="Подтвердить", callback_data=f"confirm_{profile_id}"),
+        InlineKeyboardButton(text="Отменить", callback_data="cancel_settings")
     )
     return builder.as_markup()
 
@@ -171,12 +170,17 @@ async def create_profile(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.message(ProfileStates.waiting_for_name)
 async def process_name(message: types.Message, state: FSMContext):
+    if message.text.lower() == "/cancel":
+        await state.clear()
+        await message.answer(ACTION_CANCELLED, parse_mode="HTML", reply_markup=get_main_menu())
+        return
+    
     user_id = message.from_user.id
     name = message.text.strip()
     
     profiles = db.get_profiles(user_id)
     if len(profiles) >= 10:
-        await message.answer("❌ Достигнут лимит профилей (максимум 10)")
+        await message.answer("Достигнут лимит профилей (максимум 10)")
         await state.clear()
         return
     
@@ -250,6 +254,13 @@ async def edit_schedule(callback: types.CallbackQuery, state: FSMContext):
 
 @dp.message(ProfileStates.waiting_for_sources)
 async def process_sources(message: types.Message, state: FSMContext):
+    if message.text.lower() == "/cancel":
+        await state.clear()
+        if message.from_user.id in temp:
+            del temp[message.from_user.id]
+        await message.answer(ACTION_CANCELLED, parse_mode="HTML", reply_markup=get_main_menu())
+        return
+    
     user_id = message.from_user.id
     data = temp.get(user_id, {})
     profile_id = data.get("profile_id")
@@ -270,9 +281,9 @@ async def process_sources(message: types.Message, state: FSMContext):
             try:
                 cid = await extract_channel_id(ch)
                 channels.append(cid)
-                await message.answer("✅ Добавлен канал-источник")
+                await message.answer("Добавлен канал-источник")
             except Exception as e:
-                await message.answer(f"❌ Ошибка: {e}")
+                await message.answer(f"Ошибка: {e}")
     
     if channels and profile_id:
         db.update_sources(profile_id, channels)
@@ -280,6 +291,13 @@ async def process_sources(message: types.Message, state: FSMContext):
 
 @dp.message(ProfileStates.waiting_for_targets)
 async def process_targets(message: types.Message, state: FSMContext):
+    if message.text.lower() == "/cancel":
+        await state.clear()
+        if message.from_user.id in temp:
+            del temp[message.from_user.id]
+        await message.answer(ACTION_CANCELLED, parse_mode="HTML", reply_markup=get_main_menu())
+        return
+    
     user_id = message.from_user.id
     data = temp.get(user_id, {})
     profile_id = data.get("profile_id")
@@ -300,9 +318,9 @@ async def process_targets(message: types.Message, state: FSMContext):
             try:
                 cid = await extract_channel_id(ch)
                 channels.append(cid)
-                await message.answer("✅ Добавлен канал-получатель")
+                await message.answer("Добавлен канал-получатель")
             except Exception as e:
-                await message.answer(f"❌ Ошибка: {e}")
+                await message.answer(f"Ошибка: {e}")
     
     if channels and profile_id:
         db.update_targets(profile_id, channels)
@@ -310,6 +328,13 @@ async def process_targets(message: types.Message, state: FSMContext):
 
 @dp.message(ProfileStates.waiting_for_schedule)
 async def process_schedule(message: types.Message, state: FSMContext):
+    if message.text.lower() == "/cancel":
+        await state.clear()
+        if message.from_user.id in temp:
+            del temp[message.from_user.id]
+        await message.answer(ACTION_CANCELLED, parse_mode="HTML", reply_markup=get_main_menu())
+        return
+    
     user_id = message.from_user.id
     data = temp.get(user_id, {})
     profile_id = data.get("profile_id")
@@ -390,7 +415,7 @@ async def cancel_settings(callback: types.CallbackQuery, state: FSMContext):
 async def start_profile(callback: types.CallbackQuery):
     profile_id = int(callback.data.split("_")[1])
     db.update_active(profile_id, 1)
-    await callback.answer("✅ Профиль запущен")
+    await callback.answer("Профиль запущен")
     await open_profile(callback)
 
 
@@ -398,7 +423,7 @@ async def start_profile(callback: types.CallbackQuery):
 async def stop_profile(callback: types.CallbackQuery):
     profile_id = int(callback.data.split("_")[1])
     db.update_active(profile_id, 0)
-    await callback.answer("⏸ Профиль остановлен")
+    await callback.answer("Профиль остановлен")
     await open_profile(callback)
 
 
@@ -417,19 +442,22 @@ async def delete_profile(callback: types.CallbackQuery):
 
 @dp.message(Command("cancel"))
 async def cancel_cmd(message: types.Message, state: FSMContext):
-    if await state.get_state():
+    current_state = await state.get_state()
+    if current_state is not None:
         await state.clear()
+        if message.from_user.id in temp:
+            del temp[message.from_user.id]
         await message.answer(ACTION_CANCELLED, parse_mode="HTML", reply_markup=get_main_menu())
     else:
-        await message.answer("❌ Нет активных действий")
+        await message.answer("Нет активных действий для отмены", reply_markup=get_main_menu())
 
 
 async def main():
     await bot.delete_webhook(drop_pending_updates=True)
     me = await bot.get_me()
     print("=" * 50)
-    print(f"🚀 Бот запущен: @{me.username}")
-    print(f"👑 Владелец: {OWNER_ID}")
+    print(f"Бот запущен: @{me.username}")
+    print(f"Владелец: {OWNER_ID}")
     print("=" * 50)
     await dp.start_polling(bot)
 
