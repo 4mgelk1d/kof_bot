@@ -11,540 +11,429 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InputMediaPhoto, InputMediaVideo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-# ===== НАСТРОЙКИ - ОБЯЗАТЕЛЬНО ЗАМЕНИ =====
-BOT_TOKEN = "8924285335:AAFdPfErLdSSi9a2soS8_LaazeUWTK1mH00"
-OWNER_ID = 5584463063
-ADMIN_IDS = [5584463063]
-# =========================================
+from config import BOT_TOKEN, OWNER_ID, ADMIN_IDS
+from messages import BotMessages
+from database import db
 
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=BOT_TOKEN)
 storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
-user_settings: Dict[int, Dict[str, any]] = {}
-user_messages: Dict[int, Dict[str, any]] = {}
+# Временное хранилище для текущей настройки профиля
+temp_settings: Dict[int, Dict] = {}
 
-class SetupStates(StatesGroup):
-    waiting_for_source_channels = State()
-    waiting_for_target_channels = State()
+class ProfileStates(StatesGroup):
+    waiting_for_name = State()
+    waiting_for_sources = State()
+    waiting_for_targets = State()
     waiting_for_schedule = State()
     waiting_for_confirm = State()
 
-class SupportStates(StatesGroup):
-    waiting_for_admin_message = State()
-    waiting_for_owner_reply = State()
 
-
-def get_main_menu(user_id: int):
+def get_main_menu():
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="📋 Новое копирование", callback_data="setup"),
-        InlineKeyboardButton(text="📊 Мои настройки", callback_data="my_settings"),
-        InlineKeyboardButton(text="🗑 Очистить настройки", callback_data="clear_settings")
-    )
-    if user_id in ADMIN_IDS or user_id == OWNER_ID:
-        builder.row(
-            InlineKeyboardButton(text="📞 Связь с владельцем", callback_data="contact_owner")
-        )
+    builder.row(InlineKeyboardButton(text="📁 Управление профилями", callback_data="profiles_menu"))
+    builder.row(InlineKeyboardButton(text="❓ Помощь", callback_data="help"))
     return builder.as_markup()
 
 
-def get_schedule_keyboard():
+def get_profiles_menu(user_id: int):
     builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="📤 Отправить сейчас", callback_data="schedule_now"),
-        InlineKeyboardButton(text="⏰ Отложить", callback_data="schedule_later")
-    )
-    builder.row(
-        InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_targets")
-    )
+    profiles = db.get_profiles(user_id)
+    
+    for p in profiles:
+        status = "✅" if p['is_active'] else "⏸"
+        builder.row(InlineKeyboardButton(text=f"{status} {p['name']}", callback_data=f"profile_{p['id']}"))
+    
+    builder.row(InlineKeyboardButton(text="➕ Создать профиль", callback_data="create_profile"))
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu"))
     return builder.as_markup()
 
 
-def get_schedule_back_keyboard():
+def get_profile_actions(profile_id: int, is_active: bool):
     builder = InlineKeyboardBuilder()
+    
+    if is_active:
+        builder.row(InlineKeyboardButton(text="⏸ Остановить", callback_data=f"stop_{profile_id}"))
+    else:
+        builder.row(InlineKeyboardButton(text="▶️ Запустить", callback_data=f"start_{profile_id}"))
+    
     builder.row(
-        InlineKeyboardButton(text="🔙 Назад к выбору времени", callback_data="back_to_schedule_menu")
+        InlineKeyboardButton(text="📥 Источники", callback_data=f"sources_{profile_id}"),
+        InlineKeyboardButton(text="📤 Получатели", callback_data=f"targets_{profile_id}"),
+        InlineKeyboardButton(text="⏰ Время", callback_data=f"schedule_{profile_id}")
     )
+    builder.row(
+        InlineKeyboardButton(text="🗑 Удалить", callback_data=f"delete_{profile_id}")
+    )
+    builder.row(InlineKeyboardButton(text="🔙 К списку", callback_data="profiles_menu"))
     return builder.as_markup()
 
 
-def get_confirmation_keyboard():
+def get_confirmation_keyboard(profile_id: int):
     builder = InlineKeyboardBuilder()
     builder.row(
-        InlineKeyboardButton(text="✅ Подтвердить и запустить", callback_data="confirm_yes"),
-        InlineKeyboardButton(text="❌ Отменить", callback_data="confirm_no"),
-        InlineKeyboardButton(text="⏰ Изменить время", callback_data="change_schedule")
-    )
-    return builder.as_markup()
-
-
-def get_owner_reply_keyboard(admin_id: int):
-    builder = InlineKeyboardBuilder()
-    builder.row(
-        InlineKeyboardButton(text="✉️ Ответить", callback_data=f"reply_to_admin_{admin_id}")
+        InlineKeyboardButton(text="✅ Подтвердить", callback_data=f"confirm_{profile_id}"),
+        InlineKeyboardButton(text="❌ Отменить", callback_data="cancel_settings")
     )
     return builder.as_markup()
 
 
 async def extract_channel_id(channel_input: str) -> int:
-    """Извлекает только ID канала, без сохранения ссылок"""
     channel_input = channel_input.strip()
-    
     if channel_input.lstrip('-').isdigit():
         return int(channel_input)
-    
     match = re.search(r'(?:https?://)?(?:t\.me|telegram\.me)/([a-zA-Z0-9_]+)', channel_input)
     if match:
         username = match.group(1)
-        try:
-            chat = await bot.get_chat(f"@{username}")
-            return chat.id
-        except Exception as e:
-            raise ValueError(f"Не удалось найти канал @{username}")
-    
+        chat = await bot.get_chat(f"@{username}")
+        return chat.id
     raise ValueError("Неверный формат")
 
 
-async def copy_album_to_channel(target_channel_id: int, messages: List[types.Message], caption: str = ""):
-    try:
-        media_group = []
-        for msg in messages:
-            if msg.photo:
-                media_group.append(InputMediaPhoto(
-                    media=msg.photo[-1].file_id,
-                    caption=caption if msg == messages[0] else ""
-                ))
-            elif msg.video:
-                media_group.append(InputMediaVideo(
-                    media=msg.video.file_id,
-                    caption=caption if msg == messages[0] else ""
-                ))
-        
-        if media_group:
-            await bot.send_media_group(chat_id=target_channel_id, media=media_group)
-            return True
-    except Exception as e:
-        logger.error(f"Ошибка копирования альбома: {e}")
-        return False
-
-
-async def copy_single_post_to_channel(target_channel_id: int, message: types.Message):
+async def copy_post(target_channel: int, message: types.Message):
     try:
         if message.photo:
-            await bot.send_photo(
-                chat_id=target_channel_id,
-                photo=message.photo[-1].file_id,
-                caption=message.caption or ""
-            )
+            await bot.send_photo(chat_id=target_channel, photo=message.photo[-1].file_id, caption=message.caption or "")
         elif message.video:
-            await bot.send_video(
-                chat_id=target_channel_id,
-                video=message.video.file_id,
-                caption=message.caption or ""
-            )
+            await bot.send_video(chat_id=target_channel, video=message.video.file_id, caption=message.caption or "")
         elif message.document:
-            await bot.send_document(
-                chat_id=target_channel_id,
-                document=message.document.file_id,
-                caption=message.caption or ""
-            )
+            await bot.send_document(chat_id=target_channel, document=message.document.file_id, caption=message.caption or "")
         elif message.text:
-            await bot.send_message(
-                chat_id=target_channel_id,
-                text=message.text
-            )
+            await bot.send_message(chat_id=target_channel, text=message.text)
         return True
     except Exception as e:
         logger.error(f"Ошибка копирования: {e}")
         return False
 
 
-async def copy_post_with_album_check(target_channel_id: int, message: types.Message):
-    if message.media_group_id:
-        return await copy_album_to_channel(target_channel_id, [message], message.caption or "")
-    else:
-        return await copy_single_post_to_channel(target_channel_id, message)
-
-
 @dp.channel_post()
 async def handle_new_post(message: types.Message):
-    source_channel_id = message.chat.id
+    """Автоматическое копирование новых постов"""
+    source_id = message.chat.id
+    profiles = db.get_profiles(OWNER_ID)  # Можно изменить на получение всех пользователей
     
-    for user_id, settings in user_settings.items():
-        if source_channel_id in settings.get("source_channels", []):
-            schedule_time = settings.get("schedule_time")
-            if schedule_time and datetime.now() < schedule_time:
-                continue
-            
-            for target_channel in settings.get("target_channels", []):
-                await copy_post_with_album_check(target_channel, message)
-                logger.info(f"Скопирован пост из {source_channel_id} в {target_channel}")
+    for profile in profiles:
+        if not profile['is_active']:
+            continue
+        
+        schedule_date = profile.get('schedule_date')
+        if schedule_date:
+            try:
+                start_date = datetime.strptime(schedule_date, "%Y-%m-%d")
+                if datetime.now() < start_date:
+                    continue
+            except:
+                pass
+        
+        if source_id in profile['source_channels']:
+            for target in profile['target_channels']:
+                if not db.is_post_copied(profile['id'], source_id, message.message_id):
+                    await copy_post(target, message)
+                    db.mark_post_copied(profile['id'], source_id, message.message_id)
+                    logger.info(f"Скопирован пост для профиля {profile['name']}")
 
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
-    user_id = message.from_user.id
-    
-    welcome_text = """
-🤖 <b>Бот для автоматического копирования контента</b>
-
-📢 <b>Как работает:</b>
-1. Нажмите кнопку "Новое копирование"
-2. Укажите каналы-источники (откуда копировать)
-3. Укажите каналы-получатели (куда копировать)
-4. Выберите время отправки
-5. Бот автоматически копирует ВСЕ НОВЫЕ посты
-
-⚠️ <b>Важно:</b>
-• Бот должен быть АДМИНИСТРАТОМ всех каналов
-• Копируются ТОЛЬКО новые посты
-"""
-    
-    await message.answer(welcome_text, parse_mode="HTML", reply_markup=get_main_menu(user_id))
+    await message.answer(BotMessages.START, parse_mode="HTML", reply_markup=get_main_menu())
 
 
-@dp.callback_query(F.data == "setup")
-async def setup_callback(callback: types.CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    
-    if user_id not in user_settings:
-        user_settings[user_id] = {
-            "source_channels": [],
-            "target_channels": [],
-            "schedule_time": None
-        }
-    
-    await state.set_state(SetupStates.waiting_for_source_channels)
-    await callback.message.answer(
-        "📢 <b>Шаг 1/3: Откуда копировать?</b>\n\n"
-        "Отправьте ссылки на каналы-источники (каждый с новой строки)\n\n"
-        "<b>Пример:</b>\n"
-        "https://t.me/channel1\n"
-        "https://t.me/channel2\n"
-        "-1001234567890\n\n"
-        "Когда закончите, отправьте слово <code>готово</code>\n\n"
-        "❌ Для отмены отправьте /cancel",
-        parse_mode="HTML"
-    )
+@dp.callback_query(F.data == "back_to_menu")
+async def back_to_menu(callback: types.CallbackQuery):
+    await callback.message.edit_text(BotMessages.START, parse_mode="HTML", reply_markup=get_main_menu())
     await callback.answer()
 
 
-@dp.message(SetupStates.waiting_for_source_channels)
-async def process_source_channels(message: types.Message, state: FSMContext):
+@dp.callback_query(F.data == "help")
+async def show_help(callback: types.CallbackQuery):
+    await callback.message.edit_text(BotMessages.HELP, parse_mode="HTML", reply_markup=get_main_menu())
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "profiles_menu")
+async def profiles_menu(callback: types.CallbackQuery):
+    user_id = callback.from_user.id
+    profiles = db.get_profiles(user_id)
+    text = BotMessages.PROFILES_MENU.format(count=len(profiles))
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=get_profiles_menu(user_id))
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "create_profile")
+async def create_profile(callback: types.CallbackQuery, state: FSMContext):
+    await state.set_state(ProfileStates.waiting_for_name)
+    await callback.message.edit_text(BotMessages.NEW_PROFILE, parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.message(ProfileStates.waiting_for_name)
+async def process_profile_name(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    name = message.text.strip()
+    
+    existing = db.get_profiles(user_id)
+    if len(existing) >= 10:
+        await message.answer("❌ Достигнут лимит профилей (максимум 10)")
+        await state.clear()
+        return
+    
+    profile_id = db.create_profile(user_id, name)
+    temp_settings[user_id] = {"profile_id": profile_id, "name": name}
+    
+    await message.answer(BotMessages.PROFILE_CREATED.format(name=name), parse_mode="HTML")
+    await state.set_state(ProfileStates.waiting_for_sources)
+    await message.answer(BotMessages.ASK_SOURCES.format(name=name), parse_mode="HTML")
+
+
+@dp.callback_query(F.data.startswith("profile_"))
+async def open_profile(callback: types.CallbackQuery):
+    profile_id = int(callback.data.split("_")[1])
+    profile = db.get_profile(profile_id)
+    
+    if not profile:
+        await callback.answer("Профиль не найден")
+        return
+    
+    sources_count = len(profile['source_channels'])
+    targets_count = len(profile['target_channels'])
+    schedule = profile.get('schedule_date') or "сегодня"
+    if schedule != "сегодня":
+        try:
+            schedule = datetime.strptime(schedule, "%Y-%m-%d").strftime("%d.%m.%Y")
+        except:
+            pass
+    
+    text = BotMessages.PROFILE_SETTINGS.format(
+        name=profile['name'],
+        sources_count=sources_count,
+        targets_count=targets_count,
+        schedule=schedule
+    )
+    
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=get_profile_actions(profile_id, profile['is_active']))
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("sources_"))
+async def edit_sources(callback: types.CallbackQuery, state: FSMContext):
+    profile_id = int(callback.data.split("_")[1])
+    profile = db.get_profile(profile_id)
+    
+    temp_settings[callback.from_user.id] = {"profile_id": profile_id, "name": profile['name']}
+    await state.set_state(ProfileStates.waiting_for_sources)
+    await callback.message.answer(BotMessages.ASK_SOURCES.format(name=profile['name']), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("targets_"))
+async def edit_targets(callback: types.CallbackQuery, state: FSMContext):
+    profile_id = int(callback.data.split("_")[1])
+    profile = db.get_profile(profile_id)
+    
+    temp_settings[callback.from_user.id] = {"profile_id": profile_id, "name": profile['name']}
+    await state.set_state(ProfileStates.waiting_for_targets)
+    await callback.message.answer(BotMessages.ASK_TARGETS.format(name=profile['name']), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("schedule_"))
+async def edit_schedule(callback: types.CallbackQuery, state: FSMContext):
+    profile_id = int(callback.data.split("_")[1])
+    profile = db.get_profile(profile_id)
+    
+    temp_settings[callback.from_user.id] = {"profile_id": profile_id, "name": profile['name']}
+    await state.set_state(ProfileStates.waiting_for_schedule)
+    await callback.message.answer(BotMessages.ASK_SCHEDULE.format(name=profile['name']), parse_mode="HTML")
+    await callback.answer()
+
+
+@dp.message(ProfileStates.waiting_for_sources)
+async def process_sources(message: types.Message, state: FSMContext):
+    user_id = message.from_user.id
+    data = temp_settings.get(user_id, {})
+    profile_id = data.get("profile_id")
+    name = data.get("name", "без названия")
     
     if message.text.lower() == "готово":
-        if not user_settings[user_id].get("source_channels"):
-            await message.answer("❌ Добавьте хотя бы один канал-источник")
-            return
-        
-        await state.set_state(SetupStates.waiting_for_target_channels)
-        await message.answer(
-            "📢 <b>Шаг 2/3: Куда копировать?</b>\n\n"
-            "Отправьте ссылки на каналы-получатели (каждый с новой строки)\n\n"
-            "Когда закончите, отправьте слово <code>готово</code>\n\n"
-            "❌ Для отмены отправьте /cancel",
-            parse_mode="HTML"
-        )
-    else:
-        channels = message.text.strip().split('\n')
-        for ch in channels:
-            if ch.strip():
-                try:
-                    channel_id = await extract_channel_id(ch)
-                    if channel_id not in user_settings[user_id]["source_channels"]:
-                        user_settings[user_id]["source_channels"].append(channel_id)
-                        await message.answer(f"✅ Источник добавлен (ID: {channel_id})")
-                    else:
-                        await message.answer(f"ℹ️ Канал уже добавлен")
-                except ValueError as e:
-                    await message.answer(f"❌ {e}")
+        if profile_id:
+            profile = db.get_profile(profile_id)
+            if profile and profile['source_channels']:
+                await state.set_state(ProfileStates.waiting_for_targets)
+                await message.answer(BotMessages.ASK_TARGETS.format(name=name), parse_mode="HTML")
+            else:
+                await message.answer(BotMessages.EMPTY_SOURCES, parse_mode="HTML")
+        else:
+            await message.answer("❌ Ошибка: профиль не найден")
+            await state.clear()
+        return
+    
+    channels = []
+    for ch in message.text.strip().split('\n'):
+        if ch.strip():
+            try:
+                cid = await extract_channel_id(ch)
+                channels.append(cid)
+                await message.answer(f"✅ Добавлен канал-источник")
+            except Exception as e:
+                await message.answer(f"❌ Ошибка: {e}")
+    
+    if channels and profile_id:
+        db.update_profile_sources(profile_id, channels)
+        temp_settings[user_id]["sources"] = channels
 
 
-@dp.message(SetupStates.waiting_for_target_channels)
-async def process_target_channels(message: types.Message, state: FSMContext):
+@dp.message(ProfileStates.waiting_for_targets)
+async def process_targets(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
+    data = temp_settings.get(user_id, {})
+    profile_id = data.get("profile_id")
+    name = data.get("name", "без названия")
     
     if message.text.lower() == "готово":
-        if not user_settings[user_id].get("target_channels"):
-            await message.answer("❌ Добавьте хотя бы один канал-получатель")
-            return
-        
-        await state.set_state(SetupStates.waiting_for_schedule)
-        await message.answer(
-            "⏰ <b>Шаг 3/3: Время отправки</b>\n\n"
-            "Выберите, когда отправлять посты:",
-            parse_mode="HTML",
-            reply_markup=get_schedule_keyboard()
-        )
-    else:
-        targets = message.text.strip().split('\n')
-        for target in targets:
-            if target.strip():
-                try:
-                    channel_id = await extract_channel_id(target)
-                    if channel_id not in user_settings[user_id]["target_channels"]:
-                        user_settings[user_id]["target_channels"].append(channel_id)
-                        await message.answer(f"✅ Получатель добавлен (ID: {channel_id})")
-                    else:
-                        await message.answer(f"ℹ️ Канал уже добавлен")
-                except ValueError as e:
-                    await message.answer(f"❌ {e}")
+        if profile_id:
+            profile = db.get_profile(profile_id)
+            if profile and profile['target_channels']:
+                await state.set_state(ProfileStates.waiting_for_schedule)
+                await message.answer(BotMessages.ASK_SCHEDULE.format(name=name), parse_mode="HTML")
+            else:
+                await message.answer(BotMessages.EMPTY_TARGETS, parse_mode="HTML")
+        else:
+            await message.answer("❌ Ошибка: профиль не найден")
+            await state.clear()
+        return
+    
+    channels = []
+    for ch in message.text.strip().split('\n'):
+        if ch.strip():
+            try:
+                cid = await extract_channel_id(ch)
+                channels.append(cid)
+                await message.answer(f"✅ Добавлен канал-получатель")
+            except Exception as e:
+                await message.answer(f"❌ Ошибка: {e}")
+    
+    if channels and profile_id:
+        db.update_profile_targets(profile_id, channels)
+        temp_settings[user_id]["targets"] = channels
 
 
-@dp.callback_query(F.data == "schedule_now")
-async def schedule_now(callback: types.CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    user_settings[user_id]["schedule_time"] = None
-    await show_confirmation(callback.message, user_id, state)
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "schedule_later")
-async def schedule_later(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.answer(
-        "⏰ <b>Укажите время отправки</b>\n\n"
-        "Формат: <code>ДД.ММ.ГГГГ ЧЧ:ММ</code>\n"
-        "Например: <code>25.12.2024 14:30</code>\n\n"
-        "Или через сколько часов: <code>+2</code> (через 2 часа)\n\n"
-        "❌ Для отмены отправьте /cancel",
-        parse_mode="HTML",
-        reply_markup=get_schedule_back_keyboard()
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "back_to_schedule_menu")
-async def back_to_schedule_menu(callback: types.CallbackQuery, state: FSMContext):
-    await callback.message.edit_text(
-        "⏰ <b>Шаг 3/3: Время отправки</b>\n\n"
-        "Выберите, когда отправлять посты:",
-        parse_mode="HTML",
-        reply_markup=get_schedule_keyboard()
-    )
-    await callback.answer()
-
-
-@dp.message(SetupStates.waiting_for_schedule)
+@dp.message(ProfileStates.waiting_for_schedule)
 async def process_schedule(message: types.Message, state: FSMContext):
     user_id = message.from_user.id
-    schedule_text = message.text.strip()
+    data = temp_settings.get(user_id, {})
+    profile_id = data.get("profile_id")
+    name = data.get("name", "без названия")
+    schedule_text = message.text.strip().lower()
     
     try:
-        if schedule_text.startswith('+'):
-            hours = int(schedule_text[1:])
-            schedule_time = datetime.now() + timedelta(hours=hours)
-        elif ':' in schedule_text:
-            schedule_time = datetime.strptime(schedule_text, "%d.%m.%Y %H:%M")
+        if schedule_text == "сегодня":
+            schedule_date = datetime.now().strftime("%Y-%m-%d")
+            display_schedule = "сегодня"
+        elif schedule_text == "завтра":
+            schedule_date = (datetime.now() + timedelta(days=1)).strftime("%Y-%m-%d")
+            display_schedule = "завтра"
         else:
-            raise ValueError("Неверный формат")
+            schedule_date = datetime.strptime(schedule_text, "%d.%m.%Y").strftime("%Y-%m-%d")
+            display_schedule = schedule_text
         
-        if schedule_time <= datetime.now():
-            await message.answer("❌ Время должно быть в будущем!")
-            return
-        
-        user_settings[user_id]["schedule_time"] = schedule_time
-        await show_confirmation(message, user_id, state)
+        if profile_id:
+            db.update_profile_schedule(profile_id, schedule_date)
+            profile = db.get_profile(profile_id)
+            
+            text = BotMessages.CONFIRM_SETTINGS.format(
+                name=name,
+                sources=len(profile['source_channels']),
+                targets=len(profile['target_channels']),
+                schedule=display_schedule
+            )
+            
+            await state.set_state(ProfileStates.waiting_for_confirm)
+            await message.answer(text, parse_mode="HTML", reply_markup=get_confirmation_keyboard(profile_id))
         
     except ValueError:
-        await message.answer("❌ Неверный формат. Используйте: ДД.ММ.ГГГГ ЧЧ:ММ или +часы")
+        await message.answer(BotMessages.INVALID_DATE, parse_mode="HTML")
 
 
-async def show_confirmation(message: types.Message, user_id: int, state: FSMContext):
-    settings = user_settings[user_id]
-    
-    source_count = len(settings['source_channels'])
-    target_count = len(settings['target_channels'])
-    schedule_text = "Сразу (сейчас)" if not settings["schedule_time"] else settings["schedule_time"].strftime("%d.%m.%Y %H:%M")
-    
-    summary = f"""
-📋 <b>Подтвердите настройки</b>
-
-📍 <b>Источников:</b> {source_count}
-🎯 <b>Получателей:</b> {target_count}
-⏰ <b>Время отправки:</b> {schedule_text}
-
-✅ <b>Всё верно?</b>
-    """
-    
-    await state.set_state(SetupStates.waiting_for_confirm)
-    await message.answer(summary, parse_mode="HTML", reply_markup=get_confirmation_keyboard())
-
-
-@dp.callback_query(F.data == "change_schedule")
-async def change_schedule(callback: types.CallbackQuery, state: FSMContext):
-    await schedule_later(callback, state)
-
-
-@dp.callback_query(F.data == "back_to_targets")
-async def back_to_targets(callback: types.CallbackQuery, state: FSMContext):
-    await state.set_state(SetupStates.waiting_for_target_channels)
-    await callback.message.edit_text(
-        "📢 <b>Шаг 2/3: Куда копировать?</b>\n\n"
-        "Отправьте ссылки на каналы-получатели\n\n"
-        "Когда закончите, отправьте слово <code>готово</code>",
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "confirm_yes")
+@dp.callback_query(F.data.startswith("confirm_"))
 async def confirm_settings(callback: types.CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    settings = user_settings[user_id]
+    profile_id = int(callback.data.split("_")[1])
+    profile = db.get_profile(profile_id)
     
-    await callback.message.edit_text(
-        f"✅ <b>Настройки сохранены!</b>\n\n"
-        f"📊 {len(settings['source_channels'])} источников → {len(settings['target_channels'])} получателей\n\n"
-        f"🔄 Бот копирует новые посты в реальном времени",
-        parse_mode="HTML"
-    )
-    await callback.message.answer("Меню:", reply_markup=get_main_menu(user_id))
-    await state.clear()
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "confirm_no")
-async def cancel_settings(callback: types.CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    await callback.message.edit_text("❌ Настройки отменены")
-    await callback.message.answer("Меню:", reply_markup=get_main_menu(user_id))
-    await state.clear()
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "my_settings")
-async def show_settings(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    
-    if user_id not in user_settings or not user_settings[user_id].get("source_channels"):
-        await callback.message.edit_text(
-            "📋 <b>Нет активных настроек</b>\n\n"
-            "Нажмите 'Новое копирование' чтобы настроить бота",
-            parse_mode="HTML"
+    if profile:
+        db.update_profile_active(profile_id, 1)
+        schedule = profile.get('schedule_date') or "сегодня"
+        if schedule != "сегодня":
+            try:
+                schedule = datetime.strptime(schedule, "%Y-%m-%d").strftime("%d.%m.%Y")
+            except:
+                pass
+        
+        text = BotMessages.SETTINGS_SAVED.format(
+            name=profile['name'],
+            sources=len(profile['source_channels']),
+            targets=len(profile['target_channels']),
+            schedule=schedule
         )
-    else:
-        settings = user_settings[user_id]
-        
-        text = f"""
-📊 <b>Ваши настройки</b>
-
-📍 <b>Источников:</b> {len(settings['source_channels'])}
-🎯 <b>Получателей:</b> {len(settings['target_channels'])}
-⏰ <b>Время отправки:</b> {"Сразу" if not settings.get("schedule_time") else settings["schedule_time"].strftime("%d.%m.%Y %H:%M")}
-        """
-        
         await callback.message.edit_text(text, parse_mode="HTML")
-    
-    await callback.message.answer("Меню:", reply_markup=get_main_menu(user_id))
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "clear_settings")
-async def clear_settings(callback: types.CallbackQuery):
-    user_id = callback.from_user.id
-    if user_id in user_settings:
-        del user_settings[user_id]
-    await callback.message.edit_text("🗑 Настройки удалены")
-    await callback.message.answer("Меню:", reply_markup=get_main_menu(user_id))
-    await callback.answer()
-
-
-@dp.callback_query(F.data == "contact_owner")
-async def contact_owner(callback: types.CallbackQuery, state: FSMContext):
-    user_id = callback.from_user.id
-    
-    if user_id not in ADMIN_IDS and user_id != OWNER_ID:
-        await callback.answer("У вас нет доступа к этой функции", show_alert=True)
-        return
-    
-    await state.set_state(SupportStates.waiting_for_admin_message)
-    await callback.message.answer(
-        "📞 <b>Связь с владельцем</b>\n\nНапишите ваше сообщение.\n\n❌ /cancel для отмены",
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-
-@dp.message(SupportStates.waiting_for_admin_message)
-async def process_admin_message(message: types.Message, state: FSMContext):
-    admin_id = message.from_user.id
-    admin_name = message.from_user.full_name
-    
-    owner_text = f"""
-📨 <b>Сообщение от администратора</b>
-
-👤 <b>От:</b> {admin_name}
-🆔 <b>ID:</b> <code>{admin_id}</code>
-
-📝 {message.text}
-    """
-    
-    await bot.send_message(
-        chat_id=OWNER_ID,
-        text=owner_text,
-        parse_mode="HTML",
-        reply_markup=get_owner_reply_keyboard(admin_id)
-    )
-    
-    await message.answer("✅ Сообщение отправлено владельцу")
-    await state.clear()
-
-
-@dp.callback_query(F.data.startswith("reply_to_admin_"))
-async def owner_reply(callback: types.CallbackQuery, state: FSMContext):
-    if callback.from_user.id != OWNER_ID:
-        await callback.answer("Доступ только владельцу", show_alert=True)
-        return
-    
-    admin_id = int(callback.data.split("_")[3])
-    await state.update_data(reply_to_admin=admin_id)
-    await state.set_state(SupportStates.waiting_for_owner_reply)
-    
-    await callback.message.answer(
-        f"✉️ <b>Ответ админу {admin_id}</b>\n\nНапишите ответ:\n\n❌ /cancel",
-        parse_mode="HTML"
-    )
-    await callback.answer()
-
-
-@dp.message(SupportStates.waiting_for_owner_reply)
-async def process_owner_reply(message: types.Message, state: FSMContext):
-    data = await state.get_data()
-    admin_id = data.get("reply_to_admin")
-    
-    if not admin_id:
-        await message.answer("❌ Ошибка")
-        return
-    
-    try:
-        await bot.send_message(
-            chat_id=admin_id,
-            text=f"📨 <b>Ответ владельца</b>\n\n{message.text}",
-            parse_mode="HTML"
-        )
-        await message.answer("✅ Ответ отправлен")
-    except Exception as e:
-        await message.answer(f"❌ Ошибка: {e}")
+        await callback.message.answer("Меню:", reply_markup=get_main_menu())
     
     await state.clear()
+    if callback.from_user.id in temp_settings:
+        del temp_settings[callback.from_user.id]
+    await callback.answer()
+
+
+@dp.callback_query(F.data == "cancel_settings")
+async def cancel_settings(callback: types.CallbackQuery, state: FSMContext):
+    await state.clear()
+    if callback.from_user.id in temp_settings:
+        del temp_settings[callback.from_user.id]
+    await callback.message.edit_text(BotMessages.ACTION_CANCELLED, parse_mode="HTML")
+    await callback.message.answer("Меню:", reply_markup=get_main_menu())
+    await callback.answer()
+
+
+@dp.callback_query(F.data.startswith("start_"))
+async def start_profile(callback: types.CallbackQuery):
+    profile_id = int(callback.data.split("_")[1])
+    db.update_profile_active(profile_id, 1)
+    await callback.answer("✅ Профиль запущен")
+    await open_profile(callback)
+
+
+@dp.callback_query(F.data.startswith("stop_"))
+async def stop_profile(callback: types.CallbackQuery):
+    profile_id = int(callback.data.split("_")[1])
+    db.update_profile_active(profile_id, 0)
+    await callback.answer("⏸ Профиль остановлен")
+    await open_profile(callback)
+
+
+@dp.callback_query(F.data.startswith("delete_"))
+async def delete_profile(callback: types.CallbackQuery):
+    profile_id = int(callback.data.split("_")[1])
+    profile = db.get_profile(profile_id)
+    
+    if profile:
+        name = profile['name']
+        db.delete_profile(profile_id)
+        await callback.message.edit_text(BotMessages.PROFILE_DELETED.format(name=name), parse_mode="HTML")
+        await callback.message.answer("Меню:", reply_markup=get_main_menu())
+    
+    await callback.answer()
 
 
 @dp.message(Command("cancel"))
 async def cancel_cmd(message: types.Message, state: FSMContext):
-    if await state.get_state() is None:
+    if await state.get_state():
+        await state.clear()
+        await message.answer(BotMessages.ACTION_CANCELLED, parse_mode="HTML", reply_markup=get_main_menu())
+    else:
         await message.answer("❌ Нет активных действий")
-        return
-    
-    await state.clear()
-    await message.answer("❌ Отменено", reply_markup=get_main_menu(message.from_user.id))
 
 
 async def main():
