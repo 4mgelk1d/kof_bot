@@ -372,9 +372,11 @@ async def process_schedule(message: types.Message, state: FSMContext):
             
             await state.set_state(ProfileStates.waiting_for_confirm)
             await message.answer(confirm_text, parse_mode="HTML", reply_markup=get_confirm_keyboard(profile_id))
+            return
         
     except ValueError:
         await message.answer(INVALID_DATE, parse_mode="HTML")
+        return
 
 
 @dp.callback_query(F.data.startswith("confirm_"))
