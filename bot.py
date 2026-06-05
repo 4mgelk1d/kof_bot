@@ -13,7 +13,7 @@ from aiogram.fsm.storage.memory import MemoryStorage
 from aiogram.types import InlineKeyboardButton, InputMediaPhoto, InputMediaVideo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from config import BOT_TOKEN
+from config import BOT_TOKEN, OWNER_IDS
 from messages import *
 from database import db
 
@@ -195,7 +195,7 @@ async def handle_new_post(message: types.Message):
     source_id = message.chat.id
     logger.info(f"Новый пост в канале {source_id}")
     
-    # Получаем все профили из базы данных
+    # Получаем профили ВСЕХ владельцев (всех пользователей)
     with db.get_conn() as conn:
         rows = conn.execute("SELECT * FROM profiles WHERE is_active = 1").fetchall()
         
@@ -220,6 +220,13 @@ async def handle_new_post(message: types.Message):
 
 @dp.message(Command("start"))
 async def cmd_start(message: types.Message):
+    user_id = message.from_user.id
+    
+    # Проверяем, есть ли пользователь в списке владельцев
+    if user_id not in OWNER_IDS:
+        await message.answer("Вас нет в списке админов этого бота, попробуйте позже...")
+        return
+    
     await message.answer(START, parse_mode="HTML", reply_markup=get_main_menu())
 
 
