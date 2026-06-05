@@ -286,7 +286,9 @@ async def process_sources(message: types.Message, state: FSMContext):
                 await message.answer(f"Ошибка: {e}")
     
     if channels and profile_id:
-        db.update_sources(profile_id, channels)
+        existing = db.get_profile(profile_id)['source_channels']
+        all_sources = list(set(existing + channels))
+        db.update_sources(profile_id, all_sources)
 
 
 @dp.message(ProfileStates.waiting_for_targets)
@@ -323,7 +325,9 @@ async def process_targets(message: types.Message, state: FSMContext):
                 await message.answer(f"Ошибка: {e}")
     
     if channels and profile_id:
-        db.update_targets(profile_id, channels)
+        existing = db.get_profile(profile_id)['target_channels']
+        all_targets = list(set(existing + channels))
+        db.update_targets(profile_id, all_targets)
 
 
 @dp.message(ProfileStates.waiting_for_schedule)
@@ -356,10 +360,13 @@ async def process_schedule(message: types.Message, state: FSMContext):
             db.update_schedule(profile_id, schedule_date)
             profile = db.get_profile(profile_id)
             
+            sources_list = "\n".join([f"• {ch}" for ch in profile['source_channels']]) if profile['source_channels'] else "нет"
+            targets_list = "\n".join([f"• {ch}" for ch in profile['target_channels']]) if profile['target_channels'] else "нет"
+            
             confirm_text = CONFIRM_SETTINGS.format(
                 name=name,
-                sources=len(profile['source_channels']),
-                targets=len(profile['target_channels']),
+                sources_list=sources_list,
+                targets_list=targets_list,
                 schedule=display
             )
             
@@ -385,10 +392,13 @@ async def confirm_settings(callback: types.CallbackQuery, state: FSMContext):
             except:
                 pass
         
+        sources_count = len(profile['source_channels'])
+        targets_count = len(profile['target_channels'])
+        
         text = SETTINGS_SAVED.format(
             name=profile['name'],
-            sources=len(profile['source_channels']),
-            targets=len(profile['target_channels']),
+            sources=sources_count,
+            targets=targets_count,
             schedule=schedule
         )
         
