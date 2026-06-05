@@ -1,17 +1,19 @@
 import asyncio
 import logging
 import re
+import json
 from datetime import datetime, timedelta
-from typing import Dict
+from typing import Dict, List
+from collections import defaultdict
 from aiogram import Bot, Dispatcher, types, F
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
-from aiogram.types import InlineKeyboardButton
+from aiogram.types import InlineKeyboardButton, InputMediaPhoto, InputMediaVideo
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
-from config import BOT_TOKEN, OWNER_ID, ADMIN_IDS
+from config import BOT_TOKEN
 from messages import *
 from database import db
 
@@ -23,6 +25,9 @@ storage = MemoryStorage()
 dp = Dispatcher(storage=storage)
 
 temp: Dict[int, Dict] = {}
+
+# Кэш для альбомов (хранит сообщения, ожидающие группировки)
+album_cache: Dict[str, Dict] = {}
 
 class ProfileStates(StatesGroup):
     waiting_for_name = State()
@@ -91,20 +96,98 @@ async def extract_channel_id(channel_input: str) -> int:
     raise ValueError("Неверный формат")
 
 
-async def copy_post(target: int, message: types.Message):
+async def send_album(target_channel: int, messages: List[types.Message], caption: str = ""):
+    """Отправляет альбом из нескольких фото/видео"""
+    try:
+        media_group = []
+        for i, msg in enumerate(messages):
+            if msg.photo:
+                media_group.append(InputMediaPhoto(
+                    media=msg.photo[-1].file_id,
+                    caption=caption if i == 0 else ""
+                ))
+            elif msg.video:
+                media_group.append(InputMediaVideo(
+                    media=msg.video.file_id,
+                    caption=caption if i == 0 else ""
+                ))
+        
+        if media_group:
+            await bot.send_media_group(chat_id=target_channel, media=media_group)
+            return True
+        return False
+    except Exception as e:
+        logger.error(f"Ошибка отправки альбома: {e}")
+        return False
+
+
+async def send_single_post(target_channel: int, message: types.Message):
+    """Отправляет одиночный пост"""
     try:
         if message.photo:
-            await bot.send_photo(chat_id=target, photo=message.photo[-1].file_id, caption=message.caption or "")
+            await bot.send_photo(chat_id=target_channel, photo=message.photo[-1].file_id, caption=message.caption or "")
         elif message.video:
-            await bot.send_video(chat_id=target, video=message.video.file_id, caption=message.caption or "")
+            await bot.send_video(chat_id=target_channel, video=message.video.file_id, caption=message.caption or "")
         elif message.document:
-            await bot.send_document(chat_id=target, document=message.document.file_id, caption=message.caption or "")
+            await bot.send_document(chat_id=target_channel, document=message.document.file_id, caption=message.caption or "")
         elif message.text:
-            await bot.send_message(chat_id=target, text=message.text)
+            await bot.send_message(chat_id=target_channel, text=message.text)
         return True
     except Exception as e:
-        logger.error(f"Ошибка копирования: {e}")
+        logger.error(f"Ошибка отправки: {e}")
         return False
+
+
+async def process_post_with_album_check(target_channel: int, message: types.Message, profile_id: int):
+    """Обрабатывает пост с проверкой на альбом"""
+    media_group_id = message.media_group_id
+    
+    if media_group_id:
+        # Это часть альбома
+        cache_key = f"{media_group_id}_{message.chat.id}"
+        
+        if cache_key not in album_cache:
+            album_cache[cache_key] = {
+                "messages": [],
+                "targets": [],
+                "profile_id": profile_id,
+                "timer": None
+            }
+        
+        album_cache[cache_key]["messages"].append(message)
+        
+        if target_channel not in album_cache[cache_key]["targets"]:
+            album_cache[cache_key]["targets"].append(target_channel)
+        
+        # Если таймер уже есть, не создаем новый
+        if album_cache[cache_key]["timer"] is None:
+            # Ждем 1 секунду для сбора всех сообщений альбома
+            async def send_album_cached():
+                await asyncio.sleep(1)
+                if cache_key in album_cache:
+                    cache_data = album_cache[cache_key]
+                    for tgt in cache_data["targets"]:
+                        # Проверяем, не скопированы ли уже эти сообщения
+                        all_new = True
+                        for msg in cache_data["messages"]:
+                            if db.is_post_copied(profile_id, message.chat.id, msg.message_id):
+                                all_new = False
+                                break
+                        
+                        if all_new:
+                            await send_album(tgt, cache_data["messages"])
+                            for msg in cache_data["messages"]:
+                                db.mark_post_copied(profile_id, message.chat.id, msg.message_id)
+                            logger.info(f"Альбом из {len(cache_data['messages'])} отправлен в {tgt}")
+                    
+                    del album_cache[cache_key]
+            
+            album_cache[cache_key]["timer"] = asyncio.create_task(send_album_cached())
+    else:
+        # Не альбом - отправляем сразу
+        if not db.is_post_copied(profile_id, message.chat.id, message.message_id):
+            await send_single_post(target_channel, message)
+            db.mark_post_copied(profile_id, message.chat.id, message.message_id)
 
 
 @dp.channel_post()
@@ -112,27 +195,27 @@ async def handle_new_post(message: types.Message):
     source_id = message.chat.id
     logger.info(f"Новый пост в канале {source_id}")
     
-    profiles = db.get_profiles(OWNER_ID)
-    
-    for profile in profiles:
-        if not profile['is_active']:
-            continue
+    # Получаем все профили из базы данных
+    with db.get_conn() as conn:
+        rows = conn.execute("SELECT * FROM profiles WHERE is_active = 1").fetchall()
         
-        schedule = profile.get('schedule_date')
-        if schedule:
-            try:
-                start = datetime.strptime(schedule, "%Y-%m-%d")
-                if datetime.now() < start:
-                    continue
-            except:
-                pass
-        
-        if source_id in profile['source_channels']:
-            for target in profile['target_channels']:
-                if not db.is_post_copied(profile['id'], source_id, message.message_id):
-                    await copy_post(target, message)
-                    db.mark_post_copied(profile['id'], source_id, message.message_id)
-                    logger.info(f"Скопировано для профиля {profile['name']}")
+        for row in rows:
+            profile = dict(row)
+            profile['source_channels'] = json.loads(profile['source_channels'] or '[]')
+            profile['target_channels'] = json.loads(profile['target_channels'] or '[]')
+            
+            schedule = profile.get('schedule_date')
+            if schedule:
+                try:
+                    start = datetime.strptime(schedule, "%Y-%m-%d")
+                    if datetime.now() < start:
+                        continue
+                except:
+                    pass
+            
+            if source_id in profile['source_channels']:
+                for target in profile['target_channels']:
+                    await process_post_with_album_check(target, message, profile['id'])
 
 
 @dp.message(Command("start"))
@@ -469,7 +552,6 @@ async def main():
     me = await bot.get_me()
     print("=" * 50)
     print(f"Бот запущен: @{me.username}")
-    print(f"Владелец: {OWNER_ID}")
     print("=" * 50)
     await dp.start_polling(bot)
 
