@@ -64,8 +64,12 @@ ASK_SCHEDULE = """
 CONFIRM_SETTINGS = """
 <b>Подтвердите настройки профиля "{name}"</b>
 
-<b>Откуда:</b> {sources}
-<b>Куда:</b> {targets}
+<b>Откуда (ID каналов):</b>
+{sources_list}
+
+<b>Куда (ID каналов):</b>
+{targets_list}
+
 <b>Время:</b> {schedule}
 
 Правильно?
